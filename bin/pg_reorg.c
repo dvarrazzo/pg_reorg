@@ -216,7 +216,7 @@ getoid(PGresult *res, int row, int col)
 static bool
 reorg_one_database(const char *orderby, const char *table, char *errbuf, size_t errsize)
 {
-	bool			ret = true;
+	bool			ret = false;
 	PGresult	   *res;
 	int				i;
 	int				num;
@@ -225,6 +225,50 @@ reorg_one_database(const char *orderby, const char *table, char *errbuf, size_t 
 	initStringInfo(&sql);
 
 	reconnect(ERROR);
+
+	/* Query the extension version. Exit if no match */
+	res = execute_elevel("select reorg.version()", 0, NULL, DEBUG2);
+	if (PQresultStatus(res) == PGRES_TUPLES_OK)
+	{
+		const char	   *extver;
+		const char	   *ptr;
+
+		/* the string is something like "pg_reorg 1.1.7" */
+		extver = getstr(res, 0, 0);
+		ptr = strchr(extver, ' ');
+		if (!ptr)
+		{
+			if (errbuf)
+				snprintf(errbuf, errsize,
+					"cannot parse reorg extension version: \"%s\"", extver);
+			goto cleanup;
+		}
+		if (0 != strcmp(++ptr, PROGRAM_VERSION))
+		{
+			if (errbuf)
+				snprintf(errbuf, errsize,
+					"%s version %s does not match database extension version %s",
+					PROGRAM_NAME, PROGRAM_VERSION, ptr);
+			goto cleanup;
+		}
+	}
+	else
+	{
+		if (sqlstate_equals(res, SQLSTATE_INVALID_SCHEMA_NAME))
+		{
+			/* Schema reorg does not exist. Skip the database. */
+			if (errbuf)
+				snprintf(errbuf, errsize,
+					"%s is not installed in the database", PROGRAM_NAME);
+		}
+		else
+		{
+			/* Return the error message otherwise */
+			if (errbuf)
+				snprintf(errbuf, errsize, "%s", PQerrorMessage(connection));
+		}
+		goto cleanup;
+	}
 
 	/* Disable statement timeout. */
 	command("SET statement_timeout = 0", 0, NULL);
@@ -253,20 +297,8 @@ reorg_one_database(const char *orderby, const char *table, char *errbuf, size_t 
 	/* on error skip the database */
 	if (PQresultStatus(res) != PGRES_TUPLES_OK)
 	{
-		if (sqlstate_equals(res, SQLSTATE_INVALID_SCHEMA_NAME))
-		{
-			/* Schema reorg does not exist. Skip the database. */
-			if (errbuf)
-				snprintf(errbuf, errsize,
-					"%s is not installed in the database", PROGRAM_NAME);
-		}
-		else
-		{
-			/* Return the error message otherwise */
-			if (errbuf)
-				snprintf(errbuf, errsize, "%s", PQerrorMessage(connection));
-		}
-		ret = false;
+		if (errbuf)
+			snprintf(errbuf, errsize, "%s", PQerrorMessage(connection));
 		goto cleanup;
 	}
 
@@ -333,6 +365,7 @@ reorg_one_database(const char *orderby, const char *table, char *errbuf, size_t 
 
 		reorg_one_table(&table, orderby);
 	}
+	ret = true;
 
 cleanup:
 	PQclear(res);
